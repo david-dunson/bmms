@@ -50,7 +50,7 @@ BayesLM::BayesLM(const arma::vec& yy, const arma::mat& XX, bool fixs=false){
   
   m = arma::zeros(p);
   //M = n*XtXi;
-  Mi = 1.0/n * XtX + arma::eye(p,p) * lambda;
+  Mi = 1.0/log(1.0+n) * XtX + arma::eye(p,p) * lambda;
   mtMim = 0.0; //arma::conv_to<double>::from(m.t()*Mi*m);
   
   alpha = 0.0;
@@ -87,7 +87,7 @@ BayesLM::BayesLM(arma::vec yy, arma::mat XX, double lambda_in = 1){
   
   m = arma::zeros(p);
   //M = n*XtXi;
-  Mi = 1.0/n * XtX + arma::eye(p,p) * lambda;
+  Mi = 1.0/log(1.0+n) * XtX + arma::eye(p,p) * lambda;
   mtMim = 0.0; //arma::conv_to<double>::from(m.t()*Mi*m);
   
   alpha = 2.1; // parametrization: a = mean^2 / variance + 2
@@ -124,7 +124,7 @@ BayesLM::BayesLM(const arma::vec& yy, const arma::mat& XX, double lambda_in = 1,
   m = arma::zeros(p);
   //M = n*XtXi;
   //clog << lambda << endl;
-  Mi = pow(1.0/n, 0.5) * XtX + Ip * lambda;
+  Mi = 1.0/log(1.0+n) * XtX + Ip * lambda;
   mtMim = 0.0; //arma::conv_to<double>::from(m.t()*Mi*m);
   
   alpha = 2.1; // parametrization: a = mean^2 / variance + 2
@@ -205,7 +205,7 @@ void BayesLM::lambda_update(double lambda_new){
   
   lambda = lambda_new;
   //M = Ip * lambda_new;
-  Mi = pow(1.0/n, 0.5) * XtX + Ip * lambda_new;
+  Mi = 1.0/log(1.0+n) * XtX + Ip * lambda_new;
   mtMim = arma::conv_to<double>::from(m.t()*Mi*m);
   
   //alpha = 2.25; // parametrization: a = mean^2 / variance + 2
@@ -515,6 +515,7 @@ VarSelMCMC::VarSelMCMC(const arma::vec& yy, const arma::mat& XX, const arma::vec
   arma::vec p_indices = arma::linspace<arma::vec>(0, p-1, p);
   n = y.n_elem;
   
+  icept_stored = arma::zeros(mcmc);
   beta_stored = arma::zeros(p, mcmc);
   gamma_stored = arma::zeros(p, mcmc);
   sigmasq_stored = arma::zeros(mcmc);
@@ -527,10 +528,10 @@ VarSelMCMC::VarSelMCMC(const arma::vec& yy, const arma::mat& XX, const arma::vec
   arma::uvec gammaix = arma::find(gamma);
   //clog << "test  1" << endl;
   model = BayesSelect(y, X.cols(gammaix), gin, fixsigma);
-  sampling_order = rndpp_shuffle(p_indices);
+  
   //clog << "test  2" << endl;
   for(int m=0; m<mcmc; m++){
-    //clog << "order " << sampling_order.t() << endl;
+    sampling_order = rndpp_shuffle(p_indices);
     for(int j=0; j<p; j++){
       int ix = sampling_order(j);
       gamma_proposal = gamma;
@@ -542,7 +543,8 @@ VarSelMCMC::VarSelMCMC(const arma::vec& yy, const arma::mat& XX, const arma::vec
       //clog << "test  mcmc j " << j << endl;
       double accept_probability = exp(model_proposal.marglik - model.marglik) *
         exp(model_prior_par * (model.p - model_proposal.p));
-
+      accept_probability = accept_probability > 1 ? 1.0 : accept_probability;
+      
       int accepted = rndpp_bern(accept_probability);
       if(accepted == 1){
         //clog << "accepted." << endl;
@@ -556,13 +558,25 @@ VarSelMCMC::VarSelMCMC(const arma::vec& yy, const arma::mat& XX, const arma::vec
     arma::vec beta_full = arma::zeros(p);
     beta_full.elem(gammaix) = sampled_model.b;
     
+    icept_stored(m) = sampled_model.icept;
     beta_stored.col(m) = beta_full;
     gamma_stored.col(m) = arma::conv_to<arma::vec>::from(gamma);
     sigmasq_stored(m) = sampled_model.sigmasq;
   }
-  
+  //clog << selprob << endl;
 }
 
+//' A simple Bayesian Variable Selection model using g-priors
+//' 
+//' @param y vector of responses
+//' @param X design matrix
+//' @param prior starting model (#name to be changed#)
+//' @param mcmc number of Markov chain Monte Carlo iterations
+//' @param g g-prior parameter
+//' @param model_prior_par For model M, p(M) is prop. to exp(k * p) where p is the 
+//'   number of included variables, and k is model_prior_par
+//' @param fixs Fix the regression variance to 1?
+//' @export
 //[[Rcpp::export]]
 Rcpp::List bvs(const arma::vec& y, const arma::mat& X, 
                const arma::vec& prior, int mcmc,
@@ -585,7 +599,8 @@ Rcpp::List bvs(const arma::vec& y, const arma::mat& X,
 ModularVS::ModularVS(const arma::vec& y_in, const arma::field<arma::mat>& Xall_in, 
                      const arma::field<arma::vec>& starting,
                      int mcmc_in,
-                     double gg, arma::vec ss, bool binary=false){
+                     arma::vec gg, 
+                     arma::vec module_prior_par, bool binary=false){
   
   K = Xall_in.n_elem;
   //clog << K << endl;
@@ -648,12 +663,13 @@ ModularVS::ModularVS(const arma::vec& y_in, const arma::field<arma::mat>& Xall_i
       //VarSelMCMC bvs_model(y, X, gamma_start, g, sprior, fixsigma, MCMC);
       
       //VSModule onemodule = VSModule(resid, Xall(j), gamma_start(j), 1, gg, ss(j), binary?true:false, false);
-      VarSelMCMC onemodule(resid, Xall(j), gamma_start(j), gg, ss(j), binary?true:false, 1);
+      
+      VarSelMCMC onemodule(resid, Xall(j), gamma_start(j), gg(j), module_prior_par(j), binary?true:false, 1);
       
       //varsel_modules.push_back(onemodule);
-      intercept(j, m) = iboh;// onemodule.intercept;
-      xb_cumul = xb_cumul + Xall(j) * onemodule.beta_stored.col(0);
-      resid = resid - xb_cumul;
+      intercept(j, m) = onemodule.icept_stored(0);// onemodule.intercept;
+      xb_cumul = xb_cumul + Xall(j) * onemodule.beta_stored.col(0) + onemodule.icept_stored(0);
+      resid = (binary?z:y) - xb_cumul;
       //clog << "  beta store" << endl;
       beta_store(j).col(m) = onemodule.beta_stored.col(0);
       //clog << "  gamma store" << endl;
@@ -676,15 +692,33 @@ ModularVS::ModularVS(const arma::vec& y_in, const arma::field<arma::mat>& Xall_i
   }
 }
 
-
+//' A Modular & Multiscale Bayesian Variable Selection model
+//' 
+//' @param y vector of responses
+//' @param Xall A list of length K, where each component is a design matrix at a different resolution.
+//' @param starting A list of length K with the starting configurations. Useful to restart MCMC from good locations
+//' @param mcmc_in number of Markov chain Monte Carlo iterations
+//' @param gg g-prior parameter
+//' @param module_prior_par A vector with K components.  For model M, p(M) is prop. to exp(k * p) where p is the 
+//'   number of included variables, and k is model_prior_par
+//' @param binary Are responses binary (0,1)?
+//' @export
 // [[Rcpp::export]]
 Rcpp::List momscaleBVS(const arma::vec& y, 
-                            const arma::field<arma::mat>& Xall, 
-                            const arma::field<arma::vec>& starting,
-                            int MCMC, double gg, arma::vec ss, bool binary=false){
+                       const arma::field<arma::mat>& Xall, 
+                       const arma::field<arma::vec>& starting,
+                       int mcmc, arma::vec gg, arma::vec module_prior_par, bool binary=false){
   
+  
+  arma::vec ggk;
+  if(gg.n_elem == 1){
+    ggk = arma::ones(module_prior_par.n_elem) * gg(0);
+  } else { 
+    ggk = gg;
+  }
   int n = y.n_elem;
-  ModularVS test = ModularVS(y, Xall, starting, MCMC, gg, ss, binary);
+  clog << "starting." << endl;
+  ModularVS test = ModularVS(y, Xall, starting, mcmc, gg, module_prior_par, binary);
   
   return Rcpp::List::create(
     Rcpp::Named("intercept_mc") = test.intercept,

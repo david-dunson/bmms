@@ -1,5 +1,6 @@
 //[[Rcpp::plugins(cpp11)]]
 //[[Rcpp::depends(RcppArmadillo)]]
+//[[Rcpp::interfaces(r)]]
 
 #include "truncnormal_sample.h"
 #include "image_mcmc_helper.h"
@@ -10,7 +11,6 @@ using namespace std;
 *              FUNCTIONS TO MOVE SPLIT LOCATIONS
 *                   TO APPROPRIATE NEW LOCS
 */
-
 
 // focuses around onesplit, with radius
 
@@ -32,7 +32,6 @@ arma::mat splitmask_focus(const arma::mat& mask_of_splits, arma::vec onesplit, i
 }
 
 // given focus of a split matrix, counts the zeros (ie number of available locations to move to)
-//[[Rcpp::export]]
 int number_availables(const arma::mat& splitmask_focus){
   int c1 = arma::accu(1-splitmask_focus.elem(arma::find(splitmask_focus == 0)));
   return c1;
@@ -106,11 +105,17 @@ arma::mat split_move2d(const arma::mat& mask_of_splits,
   return returning_mat;
 }
 
+//' Vector index to matrix subscripts
+//' 
+//' Get matrix subscripts from corresponding vector indices (both start from 0).
+//' This is a utility function using Armadillo's ind2sub function.
+//' @param index a vector of indices
+//' @param m a matrix (only its size is important)
+//' @export
 //[[Rcpp::export]]
-arma::mat index_to_subscript(arma::uvec index, arma::mat m){
+arma::mat index_to_subscript(const arma::uvec& index, const arma::mat& m){
   return arma::conv_to<arma::mat>::from(arma::ind2sub(arma::size(m), index));
 }
-
 
 arma::mat split_add2d(arma::mat mask_of_splits, 
                       arma::mat mask_nosplits,
@@ -269,8 +274,9 @@ arma::mat proposal_move(const arma::mat& current_split_mask,
 
 
 // finally try building a model from scratch and output beta
+//'@export
 //[[Rcpp::export]]
-Rcpp::List soi(arma::vec y, arma::cube X, arma::field<arma::mat> splits,
+Rcpp::List soi_cpp(arma::vec y, arma::cube X, arma::field<arma::mat> splits,
                       arma::mat mask_forbid,
                       double lambda_centers, double lambda_ridge, int mcmc, int burn, 
                       int radius=2,
@@ -321,6 +327,8 @@ Rcpp::List soi(arma::vec y, arma::cube X, arma::field<arma::mat> splits,
   //clog << "effective dim " << bmms_t.modules[bmms_t.n_stages-1].effective_dimension << endl;
   
   for(unsigned int m = 0; m<mcmc; m++){
+    Rcpp::checkUserInterrupt();
+    
     if(m==0){ 
       clog << "starting mcmc" << endl;
     }
@@ -533,33 +541,9 @@ Rcpp::List soi(arma::vec y, arma::cube X, arma::field<arma::mat> splits,
   );
 }
 
-
-//' Scalar-on-image Binary regression
-//' 
-//' This function applies a Bayesian Modular & Multiscale regression model to
-//' a binary response, using image predictors.
-//' @param y A numeric vector of length n with (0,1) entries
-//' @param X An array of dimension (p1, p2, n)
-//' @param centers A list with K elements, each of which is a 2-column matrix. 
-//'   Element j of this list will be a matrix listing the (additional) centers to be used 
-//'   to split the image space into regions. This parameter only corresponds to the starting value
-//'   for MCMC. Only K will remain 
-//' @param mask_forbid A matrix of dimension (p1, p2). Element (i,j) can be set to 0 if the corresponding location 
-//'   cannot be used as center, 1 if it can. Typically this should be a matrix of ones.
-//' @param lambda_centers A scalar parameter controlling the prior probability on the number of centers
-//' @param lambda_ridge A scalar parameter corresponding to a ridge parameter for each linear regression module
-//' @param mcmc Number of Markov chain-Monte Carlo iterations
-//' @param burn Number of MCMC iterations to discard
-//' @param radius A scalar parameter controlling the dimension of the jumps for the ``move" proposals 
-//'   of the centers in MCMC
-//' @param max_stages A scalar controlling the maximum number of stages. Currently fixed at K
-//' @param start_movinglev A scalar smaller or equal to K indicating which 
-//' @param partnum
-//' @param save
-//' @param save_splitmask
-//' @param fixsigma
+//'@export
 //[[Rcpp::export]]
-Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
+Rcpp::List soi_binary_cpp(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
                     arma::mat mask_forbid,
                     double lambda_centers, double lambda_ridge, int mcmc, int burn, int radius=2,
                     int start_movinglev=0,
@@ -634,6 +618,7 @@ Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
   z = bmms_t.modules[0].X_flat * bmms_t.modules[0].flatmodel.b;
   
   for(unsigned int m = 0; m<mcmc; m++){
+    Rcpp::checkUserInterrupt();
     if(m==0){ 
       clog << "starting mcmc" << endl;
     }
@@ -643,7 +628,6 @@ Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
     int rnd_moving_lev = arma::randi<int>(arma::distr_param(start_movinglev, num_levs-1));
     
     if(move_type == 3){
-      
       //clog << "R"; mh for lambda
       double lambdamult = arma::randn<double>();
       double new_lambda = 0.01 + lambda_ridge * exp(lambdamult);
@@ -688,8 +672,9 @@ Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
       proposed_bayeslm.change_module(rnd_moving_lev, propose_splitsub);
       //clog << "done" << endl;
       
-      mhr = exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
-        arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * to_from_ratio;
+      mhr = exp(proposed_bayeslm.logliks(rnd_moving_lev) - bmms_t.logliks(rnd_moving_lev)) * to_from_ratio;
+        //exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
+        //arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * to_from_ratio;
       mhr = mhr > 1 ? 1 : mhr;
       
       //clog << "moving mhr " << mhr << endl << "to_from_ratio " << to_from_ratio << endl;
@@ -721,8 +706,10 @@ Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
                                                        rnd_moving_lev, 
                                                        lambda_centers);
       
-      mhr = exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
-        arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * 
+      mhr = exp(proposed_bayeslm.logliks(rnd_moving_lev) - 
+        bmms_t.logliks(rnd_moving_lev)) * 
+        //exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
+        //arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * 
         to_from_ratio * totsplit_prior_mhr;
       mhr = mhr > 1 ? 1 : mhr;
       //cout << mhr << endl;
@@ -760,8 +747,10 @@ Rcpp::List soi_binary(arma::vec y, arma::cube X, arma::field<arma::mat> centers,
                                                          rnd_moving_lev,  
                                                          lambda_centers);
         
-        mhr = exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
-          arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * 
+        mhr = exp(proposed_bayeslm.logliks(rnd_moving_lev) - 
+          bmms_t.logliks(rnd_moving_lev)) *
+          //exp(arma::accu(proposed_bayeslm.logliks.subvec(rnd_moving_lev, proposed_bayeslm.n_stages-1)) - 
+          //arma::accu(bmms_t.logliks.subvec(rnd_moving_lev, bmms_t.n_stages-1))) * 
           to_from_ratio * totsplit_prior_mhr;
         mhr = mhr > 1 ? 1 : mhr;
         //clog << "and this " << endl;
